@@ -1,0 +1,23 @@
+# name: test/sql/radix.test
+# description: test radix extension
+# group: [radix]
+
+# Before we load the extension, this will fail
+statement error
+SELECT radix('Sam');
+----
+Catalog Error: Scalar Function with name radix does not exist!
+
+# Require statement will ensure this test is run with this extension loaded
+require radix
+
+# Confirm the extension works
+query I
+SELECT radix('Sam');
+----
+Radix Sam 🐥
+
+query I
+SELECT radix_openssl_version('Michael') ILIKE 'Radix Michael, my linked OpenSSL version is OpenSSL%';
+----
+true
