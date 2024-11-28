@@ -187,8 +187,6 @@ void RadixSplineLookupPragmaFunction(ClientContext &context, const FunctionParam
     // Parse the lookup key
     uint64_t lookup_key = std::stoull(lookup_key_str);
 
-    std::cout <<lookup_key<<std::endl;
-
     // Create the map key
     QualifiedName qname = GetQualifiedName(context, table_name);
     string map_key = qname.catalog + "." + qname.schema + "." + qname.name + "." + column_name;
@@ -205,6 +203,66 @@ void RadixSplineLookupPragmaFunction(ClientContext &context, const FunctionParam
         const auto &radix_spline = radix_spline_map_int32[map_key];
         size_t estimated_position = radix_spline.GetEstimatedPosition(lookup_key_32);
         std::cout << "Estimated position for key " << lookup_key_32 << " is: " << estimated_position << std::endl;
+    } else {
+        std::cout << "RadixSpline index not found for " << map_key << ". Please ensure you have created the index first." << std::endl;
+    }
+}
+
+/**
+ * Function to delete a RadixSpline index
+*/
+void DeleteRadixSplineIndexPragmaFunction(ClientContext &context, const FunctionParameters &parameters) {
+    string table_name = parameters.values[0].GetValue<string>();
+    string column_name = parameters.values[1].GetValue<string>();
+
+    // Create the map key
+    QualifiedName qname = GetQualifiedName(context, table_name);
+    string map_key = qname.catalog + "." + qname.schema + "." + qname.name + "." + column_name;
+
+    // Determine which RadixSpline map to delete from
+    if (radix_spline_map_int64.find(map_key) != radix_spline_map_int64.end()) {
+        radix_spline_map_int64.erase(map_key);
+        std::cout << "RadixSpline index deleted for " << map_key << ".\n";
+    } else if (radix_spline_map_int32.find(map_key) != radix_spline_map_int32.end()) {
+        radix_spline_map_int32.erase(map_key);
+        std::cout << "RadixSpline index deleted for " << map_key << ".\n";
+    } else {
+        std::cout << "RadixSpline index not found for " << map_key << ".\n";
+    }
+}
+
+/**
+ * Function to lookup range values using the RadixSpline index
+*/
+void RadixSplineRangeLookupPragmaFunction(ClientContext &context, const FunctionParameters &parameters) {
+    string table_name = parameters.values[0].GetValue<string>();
+    string column_name = parameters.values[1].GetValue<string>();
+    string start_key_str = parameters.values[2].GetValue<string>();
+    string end_key_str = parameters.values[3].GetValue<string>();
+
+    // Parse the range keys
+    uint64_t start_key = std::stoull(start_key_str);
+    uint64_t end_key = std::stoull(end_key_str);
+
+    // Create the map key
+    QualifiedName qname = GetQualifiedName(context, table_name);
+    string map_key = qname.catalog + "." + qname.schema + "." + qname.name + "." + column_name;
+
+    // Perform range lookup in the appropriate RadixSpline map
+    if (radix_spline_map_int64.find(map_key) != radix_spline_map_int64.end()) {
+        const auto &radix_spline = radix_spline_map_int64[map_key];
+        size_t start_position = radix_spline.GetEstimatedPosition(start_key);
+        size_t end_position = radix_spline.GetEstimatedPosition(end_key);
+        std::cout << "Estimated positions for range (" << start_key << " - " << end_key << ") are: "
+                  << "start: " << start_position << ", end: " << end_position << std::endl;
+    } else if (radix_spline_map_int32.find(map_key) != radix_spline_map_int32.end()) {
+        uint32_t start_key_32 = static_cast<uint32_t>(start_key);
+        uint32_t end_key_32 = static_cast<uint32_t>(end_key);
+        const auto &radix_spline = radix_spline_map_int32[map_key];
+        size_t start_position = radix_spline.GetEstimatedPosition(start_key_32);
+        size_t end_position = radix_spline.GetEstimatedPosition(end_key_32);
+        std::cout << "Estimated positions for range (" << start_key_32 << " - " << end_key_32 << ") are: "
+                  << "start: " << start_position << ", end: " << end_position << std::endl;
     } else {
         std::cout << "RadixSpline index not found for " << map_key << ". Please ensure you have created the index first." << std::endl;
     }
@@ -231,12 +289,30 @@ static void LoadInternal(DatabaseInstance &instance) {
 
     // Register the lookup_radixspline pragma
     auto lookup_radixspline_function = PragmaFunction::PragmaCall(
-        "lookup_radixspline",                                // Name of the pragma
+        "lookup_radixspline_index",                          // Name of the pragma
         RadixSplineLookupPragmaFunction,                     // Function to call
         {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR}, // Expected argument types (table name, column name, lookup key)
         {}
     );
     ExtensionUtil::RegisterFunction(instance, lookup_radixspline_function);
+
+    // Delete a RadixSpline Index
+    auto delete_radixspline_function = PragmaFunction::PragmaCall(
+        "delete_radixspline_index",                               // Name of the pragma
+        DeleteRadixSplineIndexPragmaFunction,                    // Function to call
+        {LogicalType::VARCHAR, LogicalType::VARCHAR}, // Expected argument types (table name, column name)
+        {}
+    );
+    ExtensionUtil::RegisterFunction(instance, delete_radixspline_function);
+
+    // For range lookups
+    auto range_lookup_radixspline_function = PragmaFunction::PragmaCall(
+        "range_lookup_radixspline",                             // Name of the pragma
+        RadixSplineRangeLookupPragmaFunction,                   // Function to call
+        {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR}, // Expected argument types (table name, column name, starting range, ending range)
+        {}
+    );
+    ExtensionUtil::RegisterFunction(instance, range_lookup_radixspline_function);
 }
 
 void RadixExtension::Load(DuckDB &db) {
