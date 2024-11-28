@@ -32,6 +32,9 @@
 
 namespace duckdb {
 
+const size_t kNumRadixBits = 18;
+const size_t kMaxError = 32;
+
 // Separate maps for different key types, for each table
 std::map<std::string, rs::RadixSpline<uint32_t>> radix_spline_map_int32;
 std::map<std::string, rs::RadixSpline<uint64_t>> radix_spline_map_int64;
@@ -83,10 +86,13 @@ void BulkLoadRadixSpline(duckdb::Connection &con, const std::string &table_name,
     for (size_t i = 0; i < result.size(); i++) {
         if (result[i][column_index]) {
             auto *data = dynamic_cast<Base *>(result[i][column_index].get());
-            if (std::is_same<T, uint32_t>::value && typeid(*data) == typeid(IntData)) {
-                keys.push_back(static_cast<uint32_t>(static_cast<IntData *>(data)->value));
-            } else if (std::is_same<T, uint64_t>::value && typeid(*data) == typeid(BigIntData)) {
-                keys.push_back(static_cast<uint64_t>(static_cast<BigIntData *>(data)->value));
+            int id1 = static_cast<int>(static_cast<UIntData *>(data)->id);
+            int id2 = static_cast<int>(static_cast<UBigIntData *>(data)->id);
+
+            if (id1 == 30 || id2 == 30) {
+                keys.push_back(static_cast<uint32_t>(static_cast<UIntData *>(data)->value));
+            } else if (id1 == 31 || id2 == 31) {
+                keys.push_back(static_cast<uint64_t>(static_cast<UBigIntData *>(data)->value));
             }
         }
     }
@@ -95,9 +101,11 @@ void BulkLoadRadixSpline(duckdb::Connection &con, const std::string &table_name,
     std::sort(keys.begin(), keys.end());
 
     // Build RadixSpline
-    rs::Builder<T> builder(keys.front(), keys.back());
+    rs::Builder<T> builder(keys.front(), keys.back(), kNumRadixBits, kMaxError);
+    int num = 0;
     for (const auto &key : keys) {
         builder.AddKey(key);
+        num++;
     }
 
     auto finalized_spline = builder.Finalize();
@@ -109,7 +117,7 @@ void BulkLoadRadixSpline(duckdb::Connection &con, const std::string &table_name,
         radix_spline_map_int64[map_key] = std::move(finalized_spline);
     }
 
-    std::cout << "RadixSpline successfully created for " << map_key << ".\n";
+    std::cout << "RadixSpline successfully created for " << map_key << " Total Keys Added : "<< num << ".\n";
 }
 
 
@@ -122,8 +130,7 @@ static QualifiedName GetQualifiedName(ClientContext &context, const string &qnam
 }
 
 /**
- * PragmaFunction
- * 
+ * PragmaFunction to Load the data
 */
 void createRadixSplineIndexPragmaFunction(ClientContext &context, const FunctionParameters &parameters) {
     string table_name = parameters.values[0].GetValue<string>();
@@ -169,6 +176,40 @@ void createRadixSplineIndexPragmaFunction(ClientContext &context, const Function
     }
 }
 
+/**
+ * Function to lookup a value using the RadixSpline index
+*/
+void RadixSplineLookupPragmaFunction(ClientContext &context, const FunctionParameters &parameters) {
+    string table_name = parameters.values[0].GetValue<string>();
+    string column_name = parameters.values[1].GetValue<string>();
+    string lookup_key_str = parameters.values[2].GetValue<string>();
+
+    // Parse the lookup key
+    uint64_t lookup_key = std::stoull(lookup_key_str);
+
+    std::cout <<lookup_key<<std::endl;
+
+    // Create the map key
+    QualifiedName qname = GetQualifiedName(context, table_name);
+    string map_key = qname.catalog + "." + qname.schema + "." + qname.name + "." + column_name;
+
+    // Determine which RadixSpline map to use
+    if (radix_spline_map_int64.find(map_key) != radix_spline_map_int64.end()) {
+        // Lookup in the uint64_t RadixSpline map
+        const auto &radix_spline = radix_spline_map_int64[map_key];
+        size_t estimated_position = radix_spline.GetEstimatedPosition(lookup_key);
+        std::cout << "Estimated position for key " << lookup_key << " is: " << estimated_position << std::endl;
+    } else if (radix_spline_map_int32.find(map_key) != radix_spline_map_int32.end()) {
+        // Lookup in the uint32_t RadixSpline map
+        uint32_t lookup_key_32 = static_cast<uint32_t>(lookup_key);
+        const auto &radix_spline = radix_spline_map_int32[map_key];
+        size_t estimated_position = radix_spline.GetEstimatedPosition(lookup_key_32);
+        std::cout << "Estimated position for key " << lookup_key_32 << " is: " << estimated_position << std::endl;
+    } else {
+        std::cout << "RadixSpline index not found for " << map_key << ". Please ensure you have created the index first." << std::endl;
+    }
+}
+
 static void LoadInternal(DatabaseInstance &instance) {
     // Register a scalar function
     auto radix_scalar_function = ScalarFunction("radix", {LogicalType::VARCHAR}, LogicalType::VARCHAR, RadixScalarFun);
@@ -187,6 +228,15 @@ static void LoadInternal(DatabaseInstance &instance) {
         {}
     );
     ExtensionUtil::RegisterFunction(instance, create_radixspline_index_function);
+
+    // Register the lookup_radixspline pragma
+    auto lookup_radixspline_function = PragmaFunction::PragmaCall(
+        "lookup_radixspline",                                // Name of the pragma
+        RadixSplineLookupPragmaFunction,                     // Function to call
+        {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR}, // Expected argument types (table name, column name, lookup key)
+        {}
+    );
+    ExtensionUtil::RegisterFunction(instance, lookup_radixspline_function);
 }
 
 void RadixExtension::Load(DuckDB &db) {
