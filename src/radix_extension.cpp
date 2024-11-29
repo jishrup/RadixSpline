@@ -31,13 +31,29 @@
 #include <openssl/opensslv.h>
 
 namespace duckdb {
+/*
+* Struture to store the stats of RadixSpline efficiently
+*/
+struct RadixSplineStats {
+    size_t num_keys;
+    uint64_t min_key;
+    uint64_t max_key;
+    double average_gap;
 
+    RadixSplineStats() : num_keys(0), min_key(0), max_key(0), average_gap(0.0) {}
+};
+
+// RadixSpline related variables
 const size_t kNumRadixBits = 18;
 const size_t kMaxError = 32;
 
 // Separate maps for different key types, for each table
 std::map<std::string, rs::RadixSpline<uint32_t>> radix_spline_map_int32;
 std::map<std::string, rs::RadixSpline<uint64_t>> radix_spline_map_int64;
+
+// Maps for storing the stats efficiently
+std::map<std::string, RadixSplineStats> radix_spline_stats_map_int32;
+std::map<std::string, RadixSplineStats> radix_spline_stats_map_int64;
 
 inline void RadixScalarFun(DataChunk &args, ExpressionState &state, Vector &result) {
     auto &name_vector = args.data[0];
@@ -110,11 +126,22 @@ void BulkLoadRadixSpline(duckdb::Connection &con, const std::string &table_name,
 
     auto finalized_spline = builder.Finalize();
 
+    // Collect statistics
+    RadixSplineStats stats;
+    stats.num_keys = keys.size();
+    if (!keys.empty()) {
+        stats.min_key = keys.front();
+        stats.max_key = keys.back();
+        stats.average_gap = (keys.size() > 1) ? static_cast<double>(keys.back() - keys.front()) / (keys.size() - 1) : 0.0;
+    }
+
     // Store in the appropriate map
     if constexpr (std::is_same<T, uint32_t>::value) {
         radix_spline_map_int32[map_key] = std::move(finalized_spline);
+        radix_spline_stats_map_int32[map_key] = stats;
     } else if constexpr (std::is_same<T, uint64_t>::value) {
         radix_spline_map_int64[map_key] = std::move(finalized_spline);
+        radix_spline_stats_map_int64[map_key] = stats;
     }
 
     std::cout << "RadixSpline successfully created for " << map_key << " Total Keys Added : "<< num << ".\n";
@@ -268,6 +295,37 @@ void RadixSplineRangeLookupPragmaFunction(ClientContext &context, const Function
     }
 }
 
+/**
+ * Function for collecting the stats.
+*/
+void RadixSplineStatsPragmaFunction(ClientContext &context, const FunctionParameters &parameters) {
+    string table_name = parameters.values[0].GetValue<string>();
+    string column_name = parameters.values[1].GetValue<string>();
+
+    // Create the map key
+    QualifiedName qname = GetQualifiedName(context, table_name);
+    string map_key = qname.catalog + "." + qname.schema + "." + qname.name + "." + column_name;
+
+    // Determine which RadixSpline stats map to use
+    if (radix_spline_stats_map_int64.find(map_key) != radix_spline_stats_map_int64.end()) {
+        const auto &stats = radix_spline_stats_map_int64[map_key];
+        std::cout << "Statistics for RadixSpline index '" << map_key << "':\n";
+        std::cout << " - Number of keys: " << stats.num_keys << "\n";
+        std::cout << " - Minimum key: " << stats.min_key << "\n";
+        std::cout << " - Maximum key: " << stats.max_key << "\n";
+        std::cout << " - Average gap between keys: " << stats.average_gap << "\n";
+    } else if (radix_spline_stats_map_int32.find(map_key) != radix_spline_stats_map_int32.end()) {
+        const auto &stats = radix_spline_stats_map_int32[map_key];
+        std::cout << "Statistics for RadixSpline index '" << map_key << "':\n";
+        std::cout << " - Number of keys: " << stats.num_keys << "\n";
+        std::cout << " - Minimum key: " << stats.min_key << "\n";
+        std::cout << " - Maximum key: " << stats.max_key << "\n";
+        std::cout << " - Average gap between keys: " << stats.average_gap << "\n";
+    } else {
+        std::cout << "RadixSpline index not found for " << map_key << ". Please ensure you have created the index first.\n";
+    }
+}
+
 static void LoadInternal(DatabaseInstance &instance) {
     // Register a scalar function
     auto radix_scalar_function = ScalarFunction("radix", {LogicalType::VARCHAR}, LogicalType::VARCHAR, RadixScalarFun);
@@ -313,6 +371,15 @@ static void LoadInternal(DatabaseInstance &instance) {
         {}
     );
     ExtensionUtil::RegisterFunction(instance, range_lookup_radixspline_function);
+
+    // Register the stats_radixspline pragma
+    auto stats_radixspline_function = PragmaFunction::PragmaCall(
+        "stats_radixspline",                             // Name of the pragma
+        RadixSplineStatsPragmaFunction,                  // Function to call
+        {LogicalType::VARCHAR, LogicalType::VARCHAR},    // Expected argument types (table name, column name)
+        {}
+    );
+    ExtensionUtil::RegisterFunction(instance, stats_radixspline_function);
 }
 
 void RadixExtension::Load(DuckDB &db) {
