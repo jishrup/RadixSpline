@@ -433,6 +433,69 @@ void LoadBenchmarkFromFile(ClientContext &context, const FunctionParameters &par
     load_benchmark_data_into_table<uint64_t, double>(keys, con, table_name, NUM_KEYS, num_batches_insert, per_batch);
 }
 
+/**
+ * Function to check the insertion and compare with DuckDB
+*/
+void functionSearchBenchmarkRadixSpline(ClientContext &context, const FunctionParameters &parameters) {
+    std::string table_name = parameters.values[0].GetValue<string>();
+    std::string column_name = parameters.values[1].GetValue<string>();
+    int num_keys_to_search = parameters.values[2].GetValue<int>();
+    std::vector<int> batch_sizes = {100, 1000, 5000, 10000, 100000}; // Predefined batch sizes
+
+    duckdb::Connection con(*context.db);
+
+    // Generate random keys to search
+    std::vector<uint64_t> keys(num_keys_to_search);
+    std::random_device rd;
+    std::mt19937_64 gen(rd()); // 64-bit random number generator
+    std::uniform_int_distribution<uint64_t> dist(1, UINT64_MAX); // Full uint64_t range
+    for (int i = 0; i < num_keys_to_search; ++i) {
+        keys[i] = dist(gen);
+    }
+
+    // Iterate over batch sizes
+    for (int batch_size : batch_sizes) {
+        std::cout << "Benchmarking batch size: " << batch_size << "\n";
+
+        // Search keys in DuckDB
+        auto start_duckdb_search_time = std::chrono::high_resolution_clock::now();
+        for (int i = 0; i < num_keys_to_search; i += batch_size) {
+            for (int j = i; j < std::min(i + batch_size, num_keys_to_search); ++j) {
+                std::string search_query =
+                    "SELECT " + column_name + " FROM " + table_name + " WHERE " + column_name + " = " + std::to_string(keys[j]) + ";";
+                auto res = con.Query(search_query);
+                if (res->HasError()) {
+                    std::cerr << "Error querying DuckDB: " << res->GetError() << "\n";
+                }
+            }
+        }
+        auto end_duckdb_search_time = std::chrono::high_resolution_clock::now();
+        std::chrono::duration<double> duckdb_search_duration = end_duckdb_search_time - start_duckdb_search_time;
+        std::cout << "DuckDB search time for batch size " << batch_size << ": " << duckdb_search_duration.count() << " seconds\n";
+
+        // Search keys using RadixSpline index
+        auto start_radix_search_time = std::chrono::high_resolution_clock::now();
+        for (int i = 0; i < num_keys_to_search; i += batch_size) {
+            for (int j = i; j < std::min(i + batch_size, num_keys_to_search); ++j) {
+                std::string pragma_search_index = "PRAGMA lookup_radixspline_index('" + table_name + "', '" + column_name + "', '" +
+                                                  std::to_string(keys[j]) + "');";
+                auto res = con.Query(pragma_search_index);
+                if (res->HasError()) {
+                    std::cerr << "Error querying RadixSpline index: " << res->GetError() << "\n";
+                }
+            }
+        }
+        auto end_radix_search_time = std::chrono::high_resolution_clock::now();
+        std::chrono::duration<double> radix_search_duration = end_radix_search_time - start_radix_search_time;
+        std::cout << "RadixSpline search time for batch size " << batch_size << ": " << radix_search_duration.count() << " seconds\n";
+
+        // Compare performance
+        std::cout << "Performance comparison for batch size " << batch_size << ":\n";
+        std::cout << " - DuckDB search time: " << duckdb_search_duration.count() << " seconds\n";
+        std::cout << " - RadixSpline search time: " << radix_search_duration.count() << " seconds\n";
+        std::cout << "\n";
+    }
+}
 
 static void LoadInternal(DatabaseInstance &instance) {
     // Register a scalar function
@@ -496,6 +559,15 @@ static void LoadInternal(DatabaseInstance &instance) {
         {}                            // No arguments required
     );
     ExtensionUtil::RegisterFunction(instance, load_benchmark_function);
+
+    // Register the search_benchmark_radixspline function as a pragma
+    auto search_benchmark_radixspline = PragmaFunction::PragmaCall(
+        "search_benchmark_radixspline", 
+        functionSearchBenchmarkRadixSpline,
+        {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::INTEGER}, 
+        {}
+    );
+    ExtensionUtil::RegisterFunction(instance, search_benchmark_radixspline);
 }
 
 void RadixExtension::Load(DuckDB &db) {
