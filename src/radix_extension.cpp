@@ -27,6 +27,11 @@
 #include "serializer.h"
 #include "common.h"
 
+#include <fstream>
+#include <iostream>
+#include <vector>
+#include <algorithm>
+
 // OpenSSL linked through vcpkg
 #include <openssl/opensslv.h>
 
@@ -326,6 +331,109 @@ void RadixSplineStatsPragmaFunction(ClientContext &context, const FunctionParame
     }
 }
 
+/**
+ * Load Benchmark Data into Table with Batching
+ * 
+ * Template function to load key-value pairs into DuckDB in batches.
+ * 
+ * @param keys - The keys to insert into the table.
+ * @param con - Connection to DuckDB.
+ * @param tableName - Name of the table to insert the data into.
+ * @param NUM_KEYS - Total number of keys.
+ * @param num_batches_insert - Number of batches.
+ * @param per_batch - Number of records per batch.
+ */
+template <typename K, typename P>
+void load_benchmark_data_into_table(const std::vector<K> &keys, duckdb::Connection &con, std::string tableName, int NUM_KEYS, int num_batches_insert, int per_batch) {
+    // This function will load key-value pairs into the table in batches
+    int starting = 0;
+    int ending = 0;
+
+    std::string query_prefix = "INSERT INTO " + tableName + " VALUES ";
+
+    for (int i = 0; i < num_batches_insert; i++) {
+        std::cout << "Inserting batch " << i << "\n";
+        
+        starting = i * per_batch;
+        ending = std::min(starting + per_batch, NUM_KEYS);
+        std::ostringstream tuple_stream;
+
+        // Generate batch insertion tuples
+        std::mt19937_64 gen_payload(std::random_device{}());
+
+        for (int vti = starting; vti < ending; vti++) {
+            K key = keys[vti];
+            P random_payload = static_cast<P>(gen_payload());
+
+            tuple_stream << "(" << key << ", " << random_payload << ")";
+            if (vti != ending - 1) {
+                tuple_stream << ",";
+            }
+        }
+
+        std::string to_execute_query = query_prefix + tuple_stream.str() + ";";
+        auto res = con.Query(to_execute_query);
+
+        if (!res->HasError()) {
+            std::cout << "Batch " << i << " inserted successfully.\n";
+        } else {
+            std::cerr << "Error inserting batch " << i << ": " << res->GetError() << "\n";
+        }
+    }
+
+    std::cout << "Data successfully inserted into table " << tableName << ".\n";
+}
+
+/**
+ * LoadBenchmarkFromFile - Loads data from a fixed binary file path into DuckDB and inserts in batches.
+ *
+ * @param context - The ClientContext of the current DuckDB connection.
+ */
+void LoadBenchmarkFromFile(ClientContext &context, const FunctionParameters &parameters) {
+    // Fixed file path from which the data will be loaded
+    std::string file_path = "/Users/jishnusm/Desktop/classes/AdvancedDataStores/Project/Project2/radix/test/ycsb-200M.bin";
+
+    // Open the file for reading
+    std::ifstream infile(file_path, std::ios::binary);
+    if (!infile.is_open()) {
+        throw std::runtime_error("Failed to open file: " + file_path);
+    }
+
+    // Vector to hold the keys read from the binary file
+    std::vector<uint64_t> keys;
+
+    // Read the file content into the vector
+    uint64_t value;
+    while (infile.read(reinterpret_cast<char *>(&value), sizeof(uint64_t))) {
+        keys.push_back(value);
+    }
+
+    infile.close();
+
+    if (keys.empty()) {
+        throw std::runtime_error("The file is empty or there was an issue reading the file: " + file_path);
+    }
+
+    // Step to create a table in DuckDB and insert benchmark data
+    // Define the table name
+    std::string table_name = "benchmark_table_ycsb_200M";
+
+    // Create a connection using the ClientContext
+    duckdb::Connection con(*context.db);
+
+    // SQL query to create the table with two columns: 'key' and 'payload'
+    std::string create_query = "CREATE TABLE " + table_name + " (key UBIGINT, payload DOUBLE);";
+    con.Query(create_query);
+
+    // Load data into the table using batch insertion
+    int num_batches_insert = 1000; // Number of batches to insert
+    int per_batch = 1000; // Number of records per batch
+    int NUM_KEYS = keys.size();
+
+    load_benchmark_data_into_table<uint64_t, double>(keys, con, table_name, NUM_KEYS, num_batches_insert, per_batch);
+}
+
+
 static void LoadInternal(DatabaseInstance &instance) {
     // Register a scalar function
     auto radix_scalar_function = ScalarFunction("radix", {LogicalType::VARCHAR}, LogicalType::VARCHAR, RadixScalarFun);
@@ -380,6 +488,14 @@ static void LoadInternal(DatabaseInstance &instance) {
         {}
     );
     ExtensionUtil::RegisterFunction(instance, stats_radixspline_function);
+
+    // Register the LoadBenchmarkFromFile function as a pragma
+    auto load_benchmark_function = PragmaFunction::PragmaCall(
+        "load_benchmark_from_file",   // Name of the pragma
+        LoadBenchmarkFromFile,        // Function to call
+        {}                            // No arguments required
+    );
+    ExtensionUtil::RegisterFunction(instance, load_benchmark_function);
 }
 
 void RadixExtension::Load(DuckDB &db) {
